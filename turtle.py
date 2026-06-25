@@ -387,6 +387,36 @@ with tab2:
         
         df_chart = load_and_process_data(selected_ticker, entry_window, exit_window)
         if df_chart is not None and not df_chart.empty:
+            latest = df_chart.iloc[-1]
+            c_price = float(latest['Close'])
+            atr = float(latest['ATR'])
+            entry_price = float(latest['Entry_High'])
+            
+            # ── [복원] CAN SLIM & 터틀 적합도 정보 출력창 ──────────────────
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                st.markdown("### 📋 CAN SLIM 추세 필터")
+                checks = {
+                    "현재가 > 150/200일선": c_price > float(latest['SMA_150']) and c_price > float(latest['SMA_200']),
+                    "150일선 > 200일선": float(latest['SMA_150']) > float(latest['SMA_200']),
+                    "50일선 > 150/200일선": float(latest['SMA_50']) > float(latest['SMA_150']) and float(latest['SMA_50']) > float(latest['SMA_200']),
+                    "52주 최고가 대비 -25% 이내": float(latest['52W_High']) > 0 and c_price >= float(latest['52W_High']) * 0.75,
+                }
+                for k, v in checks.items():
+                    st.markdown(f"{'✅' if v else '❌'} {k}")
+            
+            with c2:
+                st.markdown("### 🐢 터틀 포지션 지표")
+                unit_qty = int((account_size * risk_per_trade) / atr) if atr > 0 else 0
+                st.write(f"- **현재가**: {c_price:,.0f} (원/달러)")
+                st.write(f"- **현재 N (ATR)**: {atr:,.2f}")
+                st.write(f"- **적정 1 Unit 크기**: {unit_qty} 주")
+                st.write(f"- **최대 손절폭 (2N)**: {atr * 2:,.2f}")
+                
+            st.markdown("---")
+            # ───────────────────────────────────────────────────────────
+            
             df_plot = df_chart.tail(200).copy()
             df_plot['Buy_Signal'] = (df_plot['Close'] > df_plot['Entry_High']) & (df_plot['Close'].shift(1) <= df_plot['Entry_High'].shift(1))
             df_plot['Sell_Signal'] = (df_plot['Close'] < df_plot['Exit_Low']) & (df_plot['Close'].shift(1) >= df_plot['Exit_Low'].shift(1))
@@ -407,9 +437,6 @@ with tab2:
             st.plotly_chart(fig, use_container_width=True)
             
             st.subheader("🐢 터틀 피라미딩 & 손절 세부 계획")
-            latest = df_chart.iloc[-1]
-            atr = float(latest['ATR'])
-            entry_price = float(latest['Entry_High'])
             
             if not pd.isna(atr) and not pd.isna(entry_price) and atr > 0:
                 risk_amount = account_size * risk_per_trade
