@@ -67,6 +67,33 @@ if "name_cache" not in st.session_state:
         "066570.KS": ("066570.KS", "LG전자"),
     }
 
+# data_editor 리셋용 카운터 (rerun 후 위젯 key를 바꿔 강제 재렌더)
+if "editor_version" not in st.session_state:
+    st.session_state.editor_version = 0
+
+
+def _clean_positions(df: pd.DataFrame) -> pd.DataFrame:
+    """positions DataFrame 정합성 보정 & 빈 행 제거."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["티커", "종목명", "실제최초매수가", "현재보유유닛"])
+    df = df.copy()
+    for col in ["티커", "종목명"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).str.strip()
+    if "실제최초매수가" not in df.columns:
+        df["실제최초매수가"] = 0.0
+    if "현재보유유닛" not in df.columns:
+        df["현재보유유닛"] = 1
+    df["실제최초매수가"] = pd.to_numeric(df["실제최초매수가"], errors="coerce").fillna(0.0)
+    df["현재보유유닛"]   = pd.to_numeric(df["현재보유유닛"],   errors="coerce").fillna(1).astype(int)
+
+    # 티커가 비어 있거나 NaN인 행 제거 (삭제된 행 처리)
+    df = df[df["티커"].str.upper().isin(["", "NAN", "NONE"]) == False]
+    df = df[df["티커"] != ""]
+    df = df.reset_index(drop=True)
+    return df[["티커", "종목명", "실제최초매수가", "현재보유유닛"]]
+
 # ============================================================
 # 티커 정제 & 종목명 조회
 # ============================================================
@@ -374,68 +401,87 @@ tab0, tab1, tab2 = st.tabs([
 with tab0:
     st.subheader("🛠 보유 포지션 입력 및 편집")
     st.caption(
-        "💡 **국내 주식**: 6자리 숫자 입력 후 [티커 자동완성] 버튼을 누르세요.  "
-        "**해외 주식**: 영문 티커를 그대로 입력하세요."
+        "💡 **추가**: 아래 표에서 행을 직접 입력하세요. "
+        "**삭제**: 행 왼쪽 체크박스 선택 후 휴지통 아이콘. "
+        "**종목명 자동완성**: 티커 입력 후 [🔄 저장 및 종목명 업데이트] 버튼."
     )
 
-    # ── (A) data_editor: 사용자가 직접 편집 ─────────────────
+    # ── (A) data_editor ──────────────────────────────────────
+    # key에 editor_version을 포함 → 저장 후 버전 올리면 위젯 완전 재렌더
+    editor_key = f"pos_editor_v{st.session_state.editor_version}"
+
     edited = st.data_editor(
         st.session_state.positions,
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "티커":        st.column_config.TextColumn("티커", required=True),
-            "종목명":      st.column_config.TextColumn("종목명 (자동완성)", disabled=True),
-            "실제최초매수가": st.column_config.NumberColumn("최초 매수가", min_value=0.0, format="%.2f"),
-            "현재보유유닛":  st.column_config.NumberColumn("유닛 수", min_value=1, max_value=4, default=1),
+            "티커":           st.column_config.TextColumn("티커 (6자리 숫자 or 영문)", required=False),
+            "종목명":         st.column_config.TextColumn("종목명 (자동완성)", disabled=True),
+            "실제최초매수가": st.column_config.NumberColumn("최초 매수가", min_value=0.0, format="%.0f"),
+            "현재보유유닛":   st.column_config.NumberColumn("유닛 수", min_value=1, max_value=4, default=1),
         },
-        key="pos_editor",
+        key=editor_key,
     )
 
-    # ── (B) [티커 자동완성] 버튼: 클릭 시에만 API 호출 ──────
-    # rerun 루프 없이 버튼 클릭 1회로 처리
-    if st.button("🔄 티커 자동완성 / 종목명 업데이트", type="primary"):
-        resolved_rows = []
-        progress = st.progress(0, text="종목 정보 조회 중...")
-        total = len(edited)
-        for i, (_, row) in enumerate(edited.iterrows()):
-            raw_t = str(row.get("티커", "")).strip()
-            if not raw_t or raw_t.upper() in ("NAN", ""):
-                resolved_rows.append(row.to_dict())
-                progress.progress((i + 1) / max(total, 1))
-                continue
+    # ── (B) 버튼 행 ──────────────────────────────────────────
+    col_btn1, col_btn2 = st.columns([2, 1])
 
-            san_t, name = resolve_ticker(raw_t)
-            new_row = row.to_dict()
-            new_row["티커"]   = san_t if san_t else raw_t
-            new_row["종목명"] = name  if name  else raw_t
-            resolved_rows.append(new_row)
-            progress.progress((i + 1) / max(total, 1), text=f"{raw_t} → {name}")
+    with col_btn1:
+        do_update = st.button("🔄 저장 및 종목명 업데이트", type="primary", use_container_width=True)
+    with col_btn2:
+        do_reset = st.button("🗑 전체 초기화", type="secondary", use_container_width=True)
 
-        progress.empty()
-
-        # 컬럼 정합성 보정
-        new_df = pd.DataFrame(resolved_rows)
-        for col in ["티커", "종목명"]:
-            if col not in new_df.columns:
-                new_df[col] = ""
-        new_df["실제최초매수가"] = pd.to_numeric(new_df.get("실제최초매수가", 0), errors="coerce").fillna(0.0)
-        new_df["현재보유유닛"]   = pd.to_numeric(new_df.get("현재보유유닛",   1), errors="coerce").fillna(1).astype(int)
-
-        st.session_state.positions = new_df[["티커", "종목명", "실제최초매수가", "현재보유유닛"]]
-        st.success("✅ 종목명 업데이트 완료!")
+    # ── (C) 전체 초기화 ──────────────────────────────────────
+    if do_reset:
+        st.session_state.positions = pd.DataFrame(_DEFAULT_POSITIONS)
+        st.session_state.editor_version += 1
         st.rerun()
-    else:
-        # 버튼 미클릭 시에도 편집 내용 보존 (API 호출 없이 저장만)
-        save_df = edited.copy()
-        for col in ["티커", "종목명"]:
-            if col not in save_df.columns:
-                save_df[col] = ""
-        save_df["실제최초매수가"] = pd.to_numeric(save_df.get("실제최초매수가", 0), errors="coerce").fillna(0.0)
-        save_df["현재보유유닛"]   = pd.to_numeric(save_df.get("현재보유유닛",   1), errors="coerce").fillna(1).astype(int)
-        st.session_state.positions = save_df[["티커", "종목명", "실제최초매수가", "현재보유유닛"]]
 
-    # ── (C) 실시간 포지션 대응 알림판 ───────────────────────
+    # ── (D) 저장 및 종목명 업데이트 ─────────────────────────
+    elif do_update:
+        # edited에는 사용자 편집 결과(삭제 포함)가 이미 반영됨
+        # 1) 빈 티커 행 제거 (삭제된 행 + 빈 행)
+        working = _clean_positions(edited)
+
+        if working.empty:
+            st.session_state.positions = working
+            st.session_state.editor_version += 1
+            st.info("포지션이 모두 삭제되었습니다.")
+            st.rerun()
+        else:
+            # 2) 티커별 종목명 조회
+            prog = st.progress(0, text="종목 정보 조회 중...")
+            resolved_rows = []
+            total = len(working)
+
+            for i, (_, row) in enumerate(working.iterrows()):
+                raw_t = str(row["티커"]).strip()
+                san_t, fetched_name = resolve_ticker(raw_t)
+
+                new_row = row.to_dict()
+                new_row["티커"]   = san_t   if san_t         else raw_t
+                new_row["종목명"] = fetched_name if fetched_name else raw_t
+                resolved_rows.append(new_row)
+                prog.progress(
+                    (i + 1) / total,
+                    text=f"[{i+1}/{total}] {raw_t} → {fetched_name or '?'}",
+                )
+
+            prog.empty()
+
+            final = _clean_positions(pd.DataFrame(resolved_rows))
+            st.session_state.positions = final
+            st.session_state.editor_version += 1   # 위젯 key 변경 → 완전 재렌더
+            st.success(f"✅ {len(final)}개 종목 저장 완료!")
+            st.rerun()
+
+    else:
+        # 버튼 미클릭 시: 편집 내용을 즉시 session_state에 반영
+        # (삭제, 추가, 숫자 수정 등 모두 포함)
+        # → 알림판이 현재 편집 상태를 즉각 반영함
+        st.session_state.positions = _clean_positions(edited)
+
+    # ── (E) 실시간 포지션 대응 알림판 ───────────────────────
     st.divider()
     st.subheader("🚨 실시간 보유 포지션 대응 알림판")
 
