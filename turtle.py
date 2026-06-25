@@ -5,7 +5,7 @@ import numpy as np
 import plotly.graph_objects as go
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 # ── 로깅 설정 ───────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -18,7 +18,7 @@ except ImportError:
     PYKRX_AVAILABLE = False
 
 # ── 페이지 설정 (반드시 최상단) ─────────────────────────────
-st.set_page_config(page_title="CAN SLIM x 터틀 매니저", layout="wide")
+st.set_page_config(page_title="CAN SLIM x 터틀 시스템 매니저", layout="wide")
 
 # ============================================================
 # 헬퍼 함수
@@ -112,10 +112,11 @@ class PortfolioManager:
         if "pos" not in st.session_state:
             st.session_state.pos = pd.DataFrame([
                 {"티커": "005930.KS", "종목명": "삼성전자", "최초매수가": 75000.0, "보유유닛": 1},
-                {"티커": "AAPL", "종목명": "Apple", "최초매수가": 150.0, "보유유닛": 0}
+                {"티커": "AAPL", "종목명": "Apple", "최초매수가": 170.0, "보유유닛": 2}
             ])
         if "cache" not in st.session_state: st.session_state.cache = {}
         if "ev" not in st.session_state: st.session_state.ev = 0
+        if "interest_input" not in st.session_state: st.session_state.interest_input = "000660, NVDA, TSLA, 035720"
 
     @staticmethod
     def clean(df: pd.DataFrame) -> pd.DataFrame:
@@ -140,16 +141,48 @@ risk_pct = st.sidebar.slider("1유닛 리스크(%)", 0.5, 5.0, 1.0, 0.1) / 100
 # ============================================================
 # 메인 UI
 # ============================================================
-st.title("🦅 CAN SLIM x 🐢 터틀 시스템")
-t0, t1, t2 = st.tabs(["🔥 포지션 관리", "📊 종목 스캐너", "📈 정밀 분석 및 차트"])
+st.title("🦅 CAN SLIM x 🐢 터틀 시스템 실전 매니저")
+t0, t1, t2 = st.tabs(["🔥 포지션 관리 및 알림판", "📊 관심종목 스캐너", "📈 정밀 분석 및 차트"])
 
-# ── TAB 0: 포지션 ───────────────────────────────────────────
+# ── TAB 0: 포지션 관리 및 알림판 (완전 복원) ───────────────────
 with t0:
-    st.subheader("🛠 보유 포지션 편집")
+    st.subheader("🚨 실시간 보유 포지션 대응 알림판")
+    
+    # 보유 포지션에 대한 실시간 시그널 검출 및 요약 출력
+    active_alerts = 0
+    for _, row in st.session_state.pos.iterrows():
+        tk = str(row.get("티커", "")).strip()
+        if not tk: continue
+        
+        df = StrategyAnalyzer.build_indicators(tk, entry_w, exit_w)
+        if df is not None and not df.empty:
+            lat = df.iloc[-1]
+            cp = _f(lat["Close"])
+            entry_h = _f(lat["Entry_High"])
+            exit_l = _f(lat["Exit_Low"])
+            buy_p = float(row.get("최초매수가", 0))
+            units = int(row.get("보유유닛", 0))
+            
+            # 수익률 계산
+            pnl_pct = ((cp - buy_p) / buy_p * 100) if buy_p > 0 else 0.0
+            
+            # 돌파/청산 신호 판단
+            if cp >= entry_h and units > 0:
+                st.error(f"🔥 **{row['종목명']} ({tk})** 추가 매수 신호 발생! 현재가({cp:,.0f})가 {entry_w}일 최고점({entry_h:,.0f})을 돌파했습니다. (현재 손익: {pnl_pct:+.2f}%)")
+                active_alerts += 1
+            elif cp <= exit_l and units > 0:
+                st.warning(f"⚠️ **{row['종목명']} ({tk})** 전량 청산(스톱) 신호 발생! 현재가({cp:,.0f})가 {exit_w}일 최저점({exit_l:,.0f})을 하향 돌파했습니다.")
+                active_alerts += 1
+                
+    if active_alerts == 0:
+        st.success("✅ 현재 특이 시그널이 발생한 보유 종목이 없습니다. 모든 포지션을 안정적으로 유지 중입니다.")
+        
+    st.markdown("---")
+    st.subheader("🛠 보유 포지션 편집 및 저장")
     edited = st.data_editor(st.session_state.pos, num_rows="dynamic", use_container_width=True, key=f"ed_{st.session_state.ev}")
     
     c1, c2 = st.columns([2, 1])
-    if c1.button("🔄 저장 및 종목명 업데이트", type="primary"):
+    if c1.button("🔄 저장 및 종목명 업데이트", type="primary", use_container_width=True):
         wk = PortfolioManager.clean(edited)
         rows = []
         for _, r in wk.iterrows():
@@ -160,47 +193,80 @@ with t0:
         st.session_state.ev += 1
         st.rerun()
 
-# ── TAB 1: 스캐너 (복원됨) ──────────────────────────────────
+# ── TAB 1: 관심종목 스캐너 (쉼표 구분 리스트 복원) ───────────────
 with t1:
-    st.subheader("📊 관심/보유 종목 스캔 결과")
+    st.subheader("📊 멀티 종목 실전 스캐너")
+    
+    # 사라졌던 쉼표 구분 관심종목 입력 필드 완전 복원
+    interest_raw = st.text_area(
+        "스캔할 관심 종목 리스트 (쉼표 구분 - 국내 주식은 숫자만 입력 가능)",
+        value=st.session_state.interest_input,
+        help="예시: 005930, 000660, AAPL, NVDA"
+    )
+    st.session_state.interest_input = interest_raw
+    
+    # 1. 텍스트 창 파싱 및 티커 표준화
+    input_tickers = [t.strip() for t in interest_raw.split(",") if t.strip()]
+    
+    # 2. 포지션 탭에 있는 티커들도 함께 병합하여 전체 타겟 목록 구성
+    pos_tickers = [str(r.get("티커", "")).strip() for _, r in st.session_state.pos.iterrows() if str(r.get("티커", ""))]
+    all_target_raw = list(dict.fromkeys(input_tickers + pos_tickers))
+    
     scan_data = []
     
-    for _, row in st.session_state.pos.iterrows():
-        tk = str(row.get("티커", "")).strip()
-        if not tk: continue
-        
-        df = StrategyAnalyzer.build_indicators(tk, entry_w, exit_w)
-        if df is not None and not df.empty:
-            lat = df.iloc[-1]
-            cp = _f(lat["Close"])
-            atr = _f(lat["ATR"])
-            vol = StrategyAnalyzer.volume_signal(df)
-            
-            # 터틀 1유닛 수량 계산 (계좌리스크 / 1주당 변동성 리스크)
-            unit_size = int((acc_size * risk_pct) / atr) if atr > 0 else 0
-            
-            scan_data.append({
-                "티커": tk,
-                "종목명": row.get("종목명", tk),
-                "현재가": round(cp, 2),
-                "ATR (N)": round(atr, 2),
-                "권장 1유닛": f"{unit_size} 주",
-                "수급상태": vol["signal"]
-            })
+    with st.spinner("🚀 실시간 시장 데이터 및 지표 분석 중..."):
+        for raw_tk in all_target_raw:
+            if not raw_tk: continue
+            # 티커 해상 및 종목명 추출
+            tk, name = DataFetcher.resolve_ticker(raw_tk, st.session_state.cache)
+            if tk:
+                st.session_state.cache[raw_tk] = (tk, name)
+            else:
+                tk = raw_tk
+                name = raw_tk
+                
+            df = StrategyAnalyzer.build_indicators(tk, entry_w, exit_w)
+            if df is not None and not df.empty:
+                lat = df.iloc[-1]
+                cp = _f(lat["Close"])
+                atr = _f(lat["ATR"])
+                vol = StrategyAnalyzer.volume_signal(df)
+                
+                # 터틀 1유닛 수량 계산
+                unit_size = int((acc_size * risk_pct) / atr) if atr > 0 else 0
+                
+                # 돌파 상태 텍스트화
+                entry_h = _f(lat["Entry_High"])
+                exit_l = _f(lat["Exit_Low"])
+                status = "🔥 진입 대기/돌파" if cp >= entry_h else ("⚠️ 위험/청산근접" if cp <= exit_l else "🟡 유지/관망")
+                
+                scan_data.append({
+                    "티커": tk,
+                    "종목명": name,
+                    "현재가": round(cp, 2),
+                    "ATR (N)": round(atr, 2),
+                    "적정 1유닛": f"{unit_size} 주",
+                    "수급상태": vol["signal"],
+                    "돌파상태": status
+                })
     
     if scan_data:
         st.dataframe(pd.DataFrame(scan_data), use_container_width=True)
     else:
-        st.info("포지션 탭에 분석할 종목을 추가해주세요.")
+        st.info("상단 관심 종목 창 또는 포지션 탭에 종목을 입력하시면 스캔이 시작됩니다.")
 
-# ── TAB 2: 차트 & 정밀 분석 (복원됨) ────────────────────────
+# ── TAB 2: 차트 & 정밀 분석 ──────────────────────────────────
 with t2:
     st.subheader("📈 개별 종목 분석 및 차트")
-    tk_list = [str(r.get("티커", "")) for _, r in st.session_state.pos.iterrows() if str(r.get("티커", ""))]
+    # 포지션 및 텍스트창에 등장한 모든 유효 티커 추출
+    tk_list = []
+    for raw_tk in all_target_raw:
+        tk, _ = DataFetcher.resolve_ticker(raw_tk, st.session_state.cache)
+        if tk: tk_list.append(tk)
     tk_list = list(dict.fromkeys(tk_list))
     
     if tk_list:
-        sel_tk = st.selectbox("분석 종목 선택", tk_list)
+        sel_tk = st.selectbox("정밀 분석할 종목 선택", tk_list)
         df_c = StrategyAnalyzer.build_indicators(sel_tk, entry_w, exit_w)
         
         if df_c is not None and not df_c.empty:
@@ -232,8 +298,7 @@ with t2:
             st.markdown("---")
             st.markdown("### 📊 정밀 융합 차트 (Plotly)")
             
-            # Plotly 캔들스틱 및 지표 그리기
-            plot_df = df_c.tail(150) # 최근 150일만 표시하여 가독성 확보
+            plot_df = df_c.tail(150)
             fig = go.Figure()
             
             fig.add_trace(go.Candlestick(
@@ -252,4 +317,4 @@ with t2:
             st.plotly_chart(fig, use_container_width=True)
             
         else:
-            st.error("해당 종목의 지표를 계산할 수 없습니다. 상장 폐지되었거나 데이터가 부족할 수 있습니다.")
+            st.error("해당 종목의 데이터를 정상적으로 파싱할 수 없습니다.")
